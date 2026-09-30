@@ -513,9 +513,10 @@ cluster, the address is `kargo-postgres.kargo.svc:5432`.
 Two kinds of data live in it. The management controller mirrors Project
 identities from Kubernetes, which remains their source of truth. Targets, on
 the other hand, exist only in the database: the API server reads them from
-it through `/v1beta1/projects/{project}/targets`, and no Target custom
-resource is read or written anymore, even though the CRD is still installed
-for now. Because a Target belongs to its Project's mirrored row, deleting a
+it through `/v1beta1/projects/{project}/targets`, the controllers resolve
+them from it when promoting, the management controller counts them for a
+Project's stats, and no Target custom resource is read or written anymore,
+even though the CRD is still installed for now. Because a Target belongs to its Project's mirrored row, deleting a
 Project, or recreating one under the same name, removes its Targets.
 
 Every component that uses the database finds it through the same settings
