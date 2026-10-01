@@ -221,7 +221,7 @@ k8s_resource(
     'kargo-shared-resources-controller-reader:role',
     'kargo-test-gpg-signing-key:secret'
   ],
-  resource_deps=['back-end-compile', 'credential-helper-compile', ]
+  resource_deps=['back-end-compile', 'credential-helper-compile', 'db-migrate']
 )
 
 k8s_resource(

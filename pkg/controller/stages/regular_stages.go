@@ -79,6 +79,12 @@ func ReconcilerConfigFromEnv() ReconcilerConfig {
 	return cfg
 }
 
+// TargetLister lists the Targets of a Project. Targets live in the database,
+// so this is the slice of database.Store the Stage reconciler uses.
+type TargetLister interface {
+	ListTargets(ctx context.Context, project string) ([]kargoapi.Target, error)
+}
+
 type RegularStageReconciler struct {
 	cfg            ReconcilerConfig
 	client         client.Client
@@ -86,20 +92,27 @@ type RegularStageReconciler struct {
 	eventSender    kargoEvent.Sender
 	healthChecker  health.AggregatingChecker
 	shardPredicate controller.ResponsibleFor[kargoapi.Stage]
+	// targets lists the Targets a Stage may govern. It is nil when the
+	// controller runs without a database, in which case a Stage that selects
+	// Targets is reported Stalled rather than promoted.
+	targets TargetLister
 
 	backoffCfg wait.Backoff
 }
 
-// NewRegularStageReconciler creates a new Stages reconciler.
+// NewRegularStageReconciler creates a new Stages reconciler. The TargetLister
+// may be nil; see the reconciler's targets field.
 func NewRegularStageReconciler(
 	cfg ReconcilerConfig,
 	credentialsDB credentials.Database,
 	healthChecker health.AggregatingChecker,
+	targets TargetLister,
 ) *RegularStageReconciler {
 	return &RegularStageReconciler{
 		cfg:           cfg,
 		credentialsDB: credentialsDB,
 		healthChecker: healthChecker,
+		targets:       targets,
 		shardPredicate: controller.ResponsibleFor[kargoapi.Stage]{
 			IsDefaultController: cfg.IsDefaultController,
 			ShardName:           cfg.ShardName,
@@ -2261,6 +2274,22 @@ func (r *RegularStageReconciler) autoPromoteFreight(
 	newStatus := *stage.Status.DeepCopy()
 	newStatus.AutoPromotionEnabled = autoPromotionEnabled
 
+	// A Stage that selects Targets promotes through PromotionRequests, whose
+	// Targets live in the database. Without one there is nothing to resolve
+	// them from, so say so rather than fail every reconcile.
+	conditions.Delete(&newStatus, kargoapi.ConditionTypeStalled)
+	if api.IsTargetAware(stage) && r.targets == nil {
+		conditions.Set(&newStatus, &metav1.Condition{
+			Type:   kargoapi.ConditionTypeStalled,
+			Status: metav1.ConditionTrue,
+			Reason: "DatabaseNotConfigured",
+			Message: "Stage selects Targets, but the controller has no database " +
+				"to resolve them from",
+			ObservedGeneration: stage.Generation,
+		})
+		return newStatus, nil
+	}
+
 	// If the Stage has no requested Freight, then there is nothing to promote.
 	// NB: This should not happen in practice, as a Stage cannot exist without
 	// requested Freight.
@@ -2457,13 +2486,19 @@ func (r *RegularStageReconciler) createAutoPromotionRequest(
 		return nil
 	}
 
-	promotionRequest, err := api.NewPromotionRequest(ctx, r.client, stage, candidate.Name)
+	targets, err := r.targets.ListTargets(ctx, stage.Namespace)
 	if err != nil {
 		return fmt.Errorf(
-			"error building PromotionRequest for Freight %q in namespace %q: %w",
-			candidate.Name, stage.Namespace, err,
+			"error listing Targets in Project %q: %w", stage.Namespace, err,
 		)
 	}
+	if targets, err = api.FilterTargetsForStage(stage, targets); err != nil {
+		return fmt.Errorf(
+			"error resolving Targets governed by Stage %q in namespace %q: %w",
+			stage.Name, stage.Namespace, err,
+		)
+	}
+	promotionRequest := api.NewPromotionRequest(stage, candidate.Name, targets)
 
 	if err = r.client.Create(ctx, promotionRequest); err != nil {
 		// Tolerate an admission denial exactly as the Promotion path does:

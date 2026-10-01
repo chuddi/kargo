@@ -521,9 +521,14 @@ Project, or recreating one under the same name, removes its Targets.
 Every component that uses the database finds it through the same settings
 (`DATABASE_URL`, or `DATABASE_HOST` and its companions), which Tilt sets from
 the chart. A component without them runs with the database features off: the
-API server answers Target requests with `501 Not Implemented`. A component
-with them refuses to start until the schema is at the version it expects, so
-run the migrations first.
+API server answers Target requests with `501 Not Implemented`, the controller
+reports a Stage that selects Targets as `Stalled` instead of promoting to it,
+and a Promotion that names a Target fails. A component with them refuses to
+start until the schema is at the version it expects, so run the migrations
+first. Each replica and shard opens a pool of its own, so size the database's
+connection limit for all of them, or bound each pool with `pool_max_conns` in
+`DATABASE_URL`. A shard controller in another cluster cannot reach the
+bundled PostgreSQL's in-cluster address and needs `database.external`.
 
 Targets are created, replaced and deleted through `POST`, `PUT` and
 `DELETE` on the same path, with a `Target` resource as the body; the generic

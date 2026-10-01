@@ -32,6 +32,7 @@ import (
 	"github.com/akuity/kargo/pkg/controller/warehouses"
 	"github.com/akuity/kargo/pkg/credentials"
 	credsdb "github.com/akuity/kargo/pkg/credentials/kubernetes"
+	"github.com/akuity/kargo/pkg/database"
 	"github.com/akuity/kargo/pkg/health"
 	healthCheckers "github.com/akuity/kargo/pkg/health/checker/builtin"
 	"github.com/akuity/kargo/pkg/heartbeat"
@@ -55,6 +56,8 @@ import (
 )
 
 type controllerOptions struct {
+	Database database.Config
+
 	IsDefaultController bool
 	ShardName           string
 
@@ -108,6 +111,7 @@ func newControllerCommand() *cobra.Command {
 }
 
 func (o *controllerOptions) complete() {
+	o.Database = database.ConfigFromEnv()
 	o.IsDefaultController = types.MustParseBool(os.GetEnv("IS_DEFAULT_CONTROLLER", "false"))
 	o.ShardName = os.GetEnv("SHARD_NAME", "")
 
@@ -183,12 +187,31 @@ func (o *controllerOptions) run(ctx context.Context) error {
 		credsdb.DatabaseConfigFromEnv(),
 	)
 
+	// The database holds Targets. Without it, Stages that select Targets
+	// cannot be promoted and Promotions that name a Target fail.
+	var store database.Store
+	if o.Database.Configured() {
+		applicationName := "kargo-controller"
+		if o.ShardName != "" {
+			applicationName += "-" + o.ShardName
+		}
+		pool, poolErr := openDatabase(ctx, o.Database, applicationName)
+		if poolErr != nil {
+			return poolErr
+		}
+		defer pool.Close()
+		store = database.NewStore(pool)
+	} else {
+		o.Logger.Info("no database is configured; promotion to Targets is unavailable")
+	}
+
 	if err := o.setupReconcilers(
 		ctx,
 		kargoMgr,
 		argocdMgr,
 		credentialsDB,
 		stagesReconcilerCfg,
+		store,
 	); err != nil {
 		return fmt.Errorf("error setting up reconcilers: %w", err)
 	}
@@ -464,10 +487,18 @@ func (o *controllerOptions) setupReconcilers(
 	kargoMgr, argocdMgr manager.Manager,
 	credentialsDB credentials.Database,
 	stagesReconcilerCfg stages.ReconcilerConfig,
+	store database.Store,
 ) error {
 	var argoCDClient client.Client
 	if argocdMgr != nil {
 		argoCDClient = argocdMgr.GetClient()
+	}
+
+	// A nil Store must reach the reconcilers as a nil interface of their own
+	// types, which is what they test for.
+	var targetLister stages.TargetLister
+	if store != nil {
+		targetLister = store
 	}
 
 	healthCheckers.Initialize(argoCDClient)
@@ -490,6 +521,7 @@ func (o *controllerOptions) setupReconcilers(
 			promotion.DefaultExprDataCacheFn,
 		),
 		promotions.ReconcilerConfigFromEnv(),
+		promotions.NewTargetGetter(store),
 	); err != nil {
 		return fmt.Errorf("error setting up Promotions reconciler: %w", err)
 	}
@@ -506,6 +538,7 @@ func (o *controllerOptions) setupReconcilers(
 		stagesReconcilerCfg,
 		credentialsDB,
 		health.NewAggregatingChecker(),
+		targetLister,
 	).SetupWithManager(
 		ctx,
 		kargoMgr,
